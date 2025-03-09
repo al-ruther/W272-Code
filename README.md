@@ -7,25 +7,46 @@ on lead and lead compound emitting facilities.
 
 Packages necessary are (some may not be used in the final product): 
   library(tidyverse)
+  
   library(ggplot2)
+  
   library(dplyr)
+  
   library(MASS)
+  
   library(sf)
+  
   library(readr)
+  
   library(here)
+  
   library(stringr)
+  
   library(ggspatial)
+  
   library(gridExtra)
+  
   library(tigris)
+  
   library(tidygeocoder)
+  
   library(leaflet)
+  
   library(ggmap)
+  
   library(paletteer)
+  
   library(leaflet.extras)
+  
   library(classInt)
+  
   library(arcgisgeocode)
+  
   library(mapview)
+
+  
   library(htmlwidgets)
+  
 
 Data files include:
 FAA-- filtered to CA and those that have 100 and 100LL avgas available
