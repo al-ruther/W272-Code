@@ -1,0 +1,353 @@
+---
+title: "W272 Take Home Exam"
+author: "Alec Rutherford"
+date: "2025-03-07"
+output: html_document
+---
+
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(dplyr)
+library(MASS)
+library(sf)
+library(readr)
+library(here)
+library(stringr)
+library(ggspatial)
+library(gridExtra)
+library(tigris)
+library(tidygeocoder)
+library(leaflet)
+library(ggmap)
+api_key <- "2c5f72ff-a53b-4aea-8c6b-92ef30c18b9b"
+register_stadiamaps(api_key)
+library(paletteer)
+library(leaflet.extras)
+```
+
+
+# READ DATA FILES (ALL SHARE GEOID AS CENSUS TRACT #, BUT STILL NEED CHANGED TO as.character(data$GEOID)
+```{r}
+# CONTAINS CDPH BLL FOR 2018-2022
+BLL_Data <- read.csv("BLLforJoin.csv")
+BLL <- BLL_Data %>% filter(row_number() <= n()-1)
+
+BLL$GEOID <- as.character(BLL$GEOID)
+BLL$GEOID <- str_pad(BLL$GEOID, width = 11, pad = "0", side = "left")
+
+# CONTAINS ALL CES SB535 INFORMATION (census and tribal)
+SB535 <- read.csv("SB535Data.csv")
+
+SB535$GEOID <- as.character(SB535$GEOID)
+SB535$GEOID <- str_pad(SB535$GEOID, width = 11, pad = "0", side = "left")
+  
+#CONTAINS ALL CES INFORMATION
+ALL_CES <- read.csv("calenviroscreen40results.csv")
+
+ALL_CES$GEOID <- as.character(ALL_CES$GEOID)
+ALL_CES$GEOID <- str_pad(ALL_CES$GEOID, width = 11, pad = "0", side = "left")
+
+# CONTAINS ALL AIRPORT INFO FOR 100 Grade (no GEOID though)
+Grade_100 <- read.csv("~/Thesis/Spatial Analysis/100airport_data.csv")
+
+# CONTAINS ALL AIRPORT INFO FOR 100LL Grade (no GEOID though)
+Grade_100LL <- read.csv("~/Thesis/Spatial Analysis/100LLairport_data.csv")
+```
+
+## Data Runthrough...
+
+"CombinedAirports.csv" includes EACH CENSUS TRACT in CA (9,129 tracts labeled as "GEOID"), AIRPORTS THAT DISTRIBUTE 100 & 100LL AvGAS (#? labeled as Binary "Contains_100" and "Contains_100LL"--Total 9,136 due to duplicates), and SB535 DACs (2,310 tracts -- matched is "Tract") with corresponding CalEnviroScreen4.0 data.
+  - contains SB535 CES data already, but gives NA for all census tracts not listed as SB535--> clean that then use ALL_CES file instead
+ 
+## What Needs to be done...
+Input/Join "BLLforJoin.csv" (CA BLL data, 9,113) by "FIPS" to "CombinedAirports.csv"'s "GEOID"
+  BLL Totals: 42,644 children <6 with BLL >= 3.5 µg/dL, 0.024336835 Percent Children <6 with BLL >= 3.5 µg/dL, and 1,752,241 children <6 w/ BLL
+Create Binary variable labeled "Contains_SB535"
+Create Binary variable labeled "Contains_Both"
+
+Assign Quartile Ranks to "Lead_Pctl" --> Q1: 0-25, Q2: 26-50, Q3: 51-75, Q4: 76-100
+
+## Lastly
+Run Regression based off of these binary rankings
+  B0: Reference Condition--BLL, No airport, No DAC
+  B1: Has airport~both 100 and 100LL~(1), Doesn't have airport (0)
+  B2: Is SB535 DAC (1), Is not SB535 DAC (0)
+  B3: Has airport AND is DAC (Airport x SB535) (1) no(0)
+ --> more covariates like lead_Qrtl, income, etc.??
+ 
+**Give Airport Data geocode to census tract GEOID...** # LEAFLET doesnt want 3310, but 4326
+```{r}
+# make dataframe an SF object with geometry Decimal Degree columns and crs of california albers
+Both_Grades <- inner_join(Grade_100, Grade_100LL, by = "Site.Id")
+Both_Grades <- Both_Grades <- st_as_sf(Both_Grades, coords = c("ARP.Longitude.DD.y", "ARP.Latitude.DD.y"), crs = 4326) 
+#Both_Grades <- st_transform(Both_Grades, 3310)
+
+Grade_100 <- st_as_sf(Grade_100, coords = c("ARP.Longitude.DD", "ARP.Latitude.DD"), crs = 4326) 
+#Grade_100 <- st_transform(Grade_100, 3310)
+  
+Grade_100LL <- st_as_sf(Grade_100LL, coords = c("ARP.Longitude.DD", "ARP.Latitude.DD"), crs = 4326)
+#Grade_100LL <- st_transform(Grade_100LL, 3310)
+
+
+CA_Tracts <- tracts(state = "CA", year = 2023, class = "sf")
+CA_Tracts <- st_transform(CA_Tracts, 4326)
+
+CA_Count <- counties("CA")
+CA_Count <- st_transform(CA_Count, 4326)
+
+
+Map1 <- ggplot() +
+    geom_sf(data = CA_Tracts, color = "red", size = 0.1) +
+  geom_sf(data = CA_Count, fill = NA, color = "black", size = 0.1) +
+    geom_sf(data = Grade_100LL, color = "blue") +
+    geom_sf(data = Grade_100, color = "orange", size = 0.1) +
+  theme_void()
+print(Map1)
+
+
+```
+# Merge all CalEnviroScreen data with OEHHA SB535 Data and subset to LA
+```{r}
+# use left join since CES has all the data SB535 has or mutate binary through piping
+ALL_CES <- ALL_CES %>%
+  mutate(Is_SB535 = ifelse(GEOID %in% SB535$GEOID, 1,0))
+
+ALL_CES %>% 
+count(Is_SB535)
+
+SB535_sf <- st_as_sf(SB535, coords = c("Longitude", "Latitude"), crs = 4326)
+SB535_sf <- st_join(CA_Tracts, SB535_sf, left = TRUE)
+SB535_sf <- SB535_sf[!is.na(SB535_sf$ZIP), ]
+```
+
+# Visualize SB535 tracts in the map above
+```{r}
+
+Map2 <- ggplot() +
+  geom_sf(data = CA_Tracts, color = "gray40", size = 0.1) +  
+  geom_sf(data = CA_Count, fill = NA, color = "black", size = 0.1) +  
+  geom_sf(data = SB535_sf, aes(fill = "SB535"), size = 0.1) +  
+  geom_sf(data = Grade_100LL, aes(color = "Grade 100LL"), size = 2.5) +  
+  geom_sf(data = Grade_100, aes(color = "Grade 100"), size = 1) +  
+  scale_fill_manual(values = c("SB535" = "red"), 
+                    name = "SB535 Designation") +  
+  scale_color_manual(values = c("Grade 100LL" = "blue", "Grade 100" = "orange"), 
+                     name = "Fuel Grades") +  
+  theme_void() +
+  ggtitle("Airports throughout CA that distribute leaded avgas & SB535 designation") +
+  annotation_north_arrow(location = "tr", which_north = "true", 
+                         style = north_arrow_fancy_orienteering) +
+  annotate("text", x = -130, y = 30.5, label = "Sources: Federal Aviation Administration, CalEPA", 
+           hjust = 0, size = 3, color = "gray40")
+
+print(Map2)
+
+```
+# Visualize BLL across the state by county
+```{r}
+# Combine BLL data as sf polygons and aggregate tract to county
+
+BLL_poly <- CA_Tracts %>%
+  left_join(dplyr::select(BLL, GEOID, Number.children.under.6.w.BLL.at.or.above.3.5.µg.dL, Percent.Children.under..6.w.BLL.at.or.above.3.5.µg.dL,
+                  Total.Number.children.under.6.w..BLL), by = "GEOID")
+BLL_county <- BLL_poly %>%
+  mutate(County_GEOID = substr(GEOID, 1, 5))
+
+BLL_county <- BLL_county %>%
+  group_by(County_GEOID) %>%
+  summarise(
+    Number.children.under.6.w.BLL.at.or.above.3.5.µg.dL = sum(Number.children.under.6.w.BLL.at.or.above.3.5.µg.dL, na.rm = TRUE), 
+    Percent.Children.under..6.w.BLL.at.or.above.3.5.µg.dL = sum(Percent.Children.under..6.w.BLL.at.or.above.3.5.µg.dL, na.rm = TRUE), 
+    Total.Number.children.under.6.w..BLL = sum(Total.Number.children.under.6.w..BLL, na.rm = TRUE)
+  )
+
+
+```
+
+# Map BLL
+```{r}
+library(classInt)
+
+CA_BLL_Map <- ggplot(BLL_county) +
+  geom_sf(aes(fill = Percent.Children.under..6.w.BLL.at.or.above.3.5.µg.dL)) +
+  scale_fill_gradientn(
+    colors = c("lightblue", "yellow", "red"), 
+                       limits = range(BLL_county$Percent.Children.under..6.w.BLL.at.or.above.3.5.µg.dL, na.rm = TRUE)) +
+  theme_void() +
+  ggtitle("% Children in California under 6 with BLL ≥ 3.5 µg/dL by county") +
+  labs(fill = "Percent children ≥ 3.5 µg/dL out of all \nchildren with BLL tested by county") +
+  annotation_north_arrow(location = "tr", which_north = "true", 
+                         style = north_arrow_fancy_orienteering) +
+  annotate("text", x = -130, y = 30.5, label = "Source: Childhood Lead Poisoning Prevention Branch, 
+           CDDPH (2018-2022)", 
+           hjust = 0, size = 3, color = "gray40")
+
+print(CA_BLL_Map)
+```
+
+# We see that LA has the highest values, so subset to look closer to eventually add more info
+```{r}
+# MAYBE Don't keep
+LA_CES <- ALL_CES %>%
+  subset(California.County == "Los Angeles")
+
+LA_CES <- st_as_sf(LA_CES, coords = c("Longitude", "Latitude"), crs = 4326)
+LA_CES <- st_join(LA_Tracts, LA_CES, left = TRUE)
+
+# Subset counties data to LA
+LA <- CA_Count %>%
+  subset(NAME == "Los Angeles")
+# Same for census tracts, since most other data is by tract
+LA_Tracts <- CA_Tracts %>%
+  subset(COUNTYFP == "037")
+# Same for subsetting airports that sell both grades
+Both_grades_LA <- Both_Grades %>%
+  st_intersection(LA)
+# Create 1km buffer around airports
+LAairport_buffer <- st_buffer(Both_grades_LA, dist = 1000) 
+
+# Subset CalEPA SB535 Disadvantaged Communities data to LA
+LA_SB535 <- SB535 %>%
+  subset(California.County == "Los Angeles")
+
+LA_SB535 <- st_as_sf(LA_SB535, coords = c("Longitude", "Latitude"), crs = 4326)
+LA_SB535 <- st_join(LA_Tracts, LA_SB535, left = TRUE) 
+LA_SB535 <- LA_SB535[!is.na(LA_SB535$ZIP), ] # keeps it as sf with geometry, but highlights only polygons that are SB535
+
+
+```
+
+
+# Load EPA Toxics Release Inventory data for CA on lead/lead compound emitting facilities
+```{r}
+Test_Lead_Facilities <- read.csv("2023_ca_Lead_Emitters.csv")
+```
+
+# Geocode lead facilities and transform to SF
+```{r}
+library(ggmap)
+library(arcgisgeocode)
+Test_Lead_Facilities$Full.Address <- paste0(
+  Test_Lead_Facilities$X5..STREET.ADDRESS, ", ", Test_Lead_Facilities$X6..CITY, ", California", ", ", Test_Lead_Facilities$X9..ZIP)
+
+Test_Lead_Facilities$Full.Address <- as.character(Test_Lead_Facilities$Full.Address)
+Test_Lead_Facilities$Full.Address <- trimws(Test_Lead_Facilities$Full.Address)
+
+
+Facility_coords <- Test_Lead_Facilities %>%
+tidygeocoder::geocode(address = Full.Address,
+method = "arcgis", lat = X12..LATITUDE, long = X13..LONGITUDE,
+full_results = TRUE)
+
+sum(is.na(Facility_coords$location.x))
+Facility_coords$Full.Address[which(is.na(Facility_coords$location.x))]
+
+# no missing addresses it seems, so change to sf object
+Facility_coords_sf <- st_as_sf(Facility_coords, coords = c("X13..LONGITUDE...13", "X12..LATITUDE...12"), crs = 4326)
+
+# visualize
+ggplot() +
+geom_sf(data = CA_Tracts, fill = "white", color = "lightgrey", size = 0.1) +
+  geom_sf(data = Facility_coords_sf, aes(color = "TRI Facility"), size = 2) +
+scale_color_manual(values = c("TRI Facility" = "red"), 
+                     name = "2023 Lead Emitting Facilities")+ 
+theme_void()
+
+
+# Subset this data to LA as well
+LA_Facilities <- Facility_coords %>%
+  subset(X7..COUNTY == "LOS ANGELES")
+
+LA_Centroid <- st_centroid(LA) %>%
+  st_coordinates()
+```
+
+
+
+# Create interactive Leaflet map to depict airports, Lead Emitting facilities, and SB535 Communities across the whole state
+```{r}
+library(mapview)
+library(htmlwidgets)
+
+CA_MAP <- leaflet(data = Both_Grades) %>% addProviderTiles(providers$Esri.WorldStreetMap) %>%
+  addPolygons(data = CA_Tracts, color = "black", stroke = .1, fill = NA, weight = .1) %>%
+addPolygons(data = SB535_sf, fillColor = ~ifelse(is.na(CES.4.0.Score), NA, "red"),
+    color = "black",             # Border color
+    weight = .3,                  # Border width
+    opacity = 1,                 # Border opacity
+    fillOpacity = ~ifelse(is.na(CES.4.0.Score), 0, 0.7)) %>%
+  addCircleMarkers(lng = ~ARP.Longitude.DD.x, lat = ~ARP.Latitude.DD.x, 
+                   fillColor = "goldenrod", fillOpacity = 1,
+                   stroke = F, 
+                   label = paste0(Both_Grades$Name.x, ", " , 
+                                  Both_Grades$City.x)) %>%
+  addCircles(radius = 1000) %>%
+  addCircleMarkers(data = Facility_coords, lng = ~location.x, lat = ~location.y,
+                   fillColor = "green", fillOpacity = 1, color = "black", weight = .5,  
+                   label = paste0(Facility_coords_sf$X4..FACILITY.NAME)) %>%
+  addLegend(position = "bottomright", 
+            colors = c("red", "goldenrod", "green"), 
+            labels = c("SB535 Designated Census Tract (Excluding Tribal Land)", "General Aviation Airports & 1km buffer (Airport Name, City)", "Lead Emitting Facilities (Facility Name)"), 
+            title = "Legend",
+            opacity = 1) %>%
+  addScaleBar(position = "topright")
+  
+  print(CA_MAP)
+  
+  # Save html for sharing
+  mapshot(CA_MAP, "AR_CA_Airports&LeadFacilities_leafletTest.html")
+  
+saveWidget(CA_MAP, "W272California-leaflet_map.html", selfcontained = TRUE)
+
+```
+
+# LA Test of polygons/points
+```{r}
+# TEST VISUALIZATION
+ggplot() +
+  geom_sf(data = LA_SB535, fill = "red") +
+  geom_sf(data = Both_grades_LA) + 
+    geom_sf(data = LAairport_buffer, fill = NA, color = "blue", stroke = 0.5) +
+  scale_fill_distiller(name = "Block group estimated population", 
+                       palette = "Reds", direction = 1) +
+  theme_void()
+  
+```
+
+# Highlighting the county with the highest BLL numbers and largest concentration of lead emitters, making interactive Leaflet map
+```{r}
+
+LA_MAP <- leaflet(Both_grades_LA) %>% addProviderTiles(providers$Esri.WorldStreetMap) %>%
+  setView(lng = -118.2191, lat =33.97931, zoom = 10) %>%
+  addPolygons(data = LA, color = "black", stroke = .1, fill = NA) %>%
+  addPolygons(data = LA_SB535, color = "black", fillColor = "red", 
+              weight = .5, opacity = 1, fillOpacity = .5) %>%
+    addCircleMarkers(lng = ~ARP.Longitude.DD.x, lat = ~ARP.Latitude.DD.x, 
+                     color = "black", 
+                     fillColor = "goldenrod",
+                   stroke = TRUE, fillOpacity = 1, 
+                   label = paste0(Both_grades_LA$Name.x, ", " , 
+                                  Both_grades_LA$City.x)) %>%
+    addCircles(radius = 1000, fillOpacity = 0.1, color = "black") %>%
+  addCircleMarkers(data = LA_Facilities, lng = ~location.x, lat = ~location.y,
+                   fillColor = "green", color = "black", weight = 1, 
+                   stroke = TRUE, fillOpacity = 1, 
+                   label = paste0(LA_Facilities$X4..FACILITY.NAME)) %>%
+  addLegend(position = "bottomright", 
+            colors = c("red", "goldenrod", "green"), 
+            labels = c("SB535 Census Tract (Excluding Tribal Land)", "General Aviation Airports & 1km buffer (Airport Name, City)", 
+            "Lead Emitting Facilities (Facility Name)"), 
+            title = "Legend",
+            opacity = 1) %>%
+  addScaleBar(position = "topright")
+
+print(LA_MAP)
+
+
+# Save html for sharing
+mapshot(LA_MAP, "AR_LosAngeles_Airports&LeadFacilities_leafletTest.html")
+
+saveWidget(LA_MAP, "W272LosAngeles-leaflet_map.html", selfcontained = TRUE)
+
+```
